@@ -28,9 +28,9 @@ Este indice incluye un diagrama de arquitectura de Quotes App para apoyar la exp
 Desde esta carpeta, ejecuta:
 
 ```bash
-git clone https://AntCloudX@dev.azure.com/AntCloudX/QuotesAppLiveDomain/_git/quotes-infra-iac
-git clone https://AntCloudX@dev.azure.com/AntCloudX/QuotesAppLiveDomain/_git/quotes-frontend
-git clone https://AntCloudX@dev.azure.com/AntCloudX/QuotesAppLiveDomain/_git/quotes-backend
+git clone https://dev.azure.com/<organizacion>/<proyecto>/_git/quotes-infra-iac
+git clone https://dev.azure.com/<organizacion>/<proyecto>/_git/quotes-frontend
+git clone https://dev.azure.com/<organizacion>/<proyecto>/_git/quotes-backend
 ```
 
 > Nota: si Azure DevOps solicita credenciales, usa tu cuenta o un token de acceso personal con permisos minimos.
@@ -118,7 +118,7 @@ git init
 git add README.md .gitignore
 git commit -m "first commit"
 git branch -M main
-git remote add origin https://github.com/joseantcloud/recursos-curso-completo-azure-devops-con-ai.git
+git remote add origin https://github.com/<usuario-o-organizacion>/<repositorio>.git
 git push -u origin main
 ```
 

@@ -1,0 +1,669 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  name: self-host-agent-quotes-app
+
+variables:
+  - group: vars-backend
+
+  - name: buildConfiguration
+    value: Release
+
+  - name: projectPath
+    value: '**/AzureQuotes.Api.csproj'
+
+  - name: publishDirectory
+    value: '$(Build.ArtifactStagingDirectory)/publish'
+
+  - name: packagePath
+    value: '$(Build.ArtifactStagingDirectory)/backend.zip'
+
+stages:
+  - stage: Build
+    displayName: Build Backend
+    jobs:
+      - job: BuildBackend
+        displayName: Build ASP.NET Core Backend
+        steps:
+          - checkout: self
+            displayName: Checkout repository
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - BUILD CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "Repository root:"
+              Write-Host "$(System.DefaultWorkingDirectory)"
+              Write-Host ""
+              Write-Host "Agent name:"
+              Write-Host "$(Agent.Name)"
+              Write-Host ""
+              Write-Host "Agent OS:"
+              Write-Host "$(Agent.OS)"
+              Write-Host ""
+              Write-Host "Build configuration:"
+              Write-Host "$(buildConfiguration)"
+              Write-Host ""
+              Write-Host "Project search pattern:"
+              Write-Host "$(projectPath)"
+              Write-Host "============================================================"
+            displayName: Print build context
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 2 - SEARCHING .CSPROJ FILES"
+              Write-Host "============================================================"
+
+              $projects = Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse -Filter *.csproj
+
+              if ($projects.Count -eq 0) {
+                Write-Error "No .csproj files were found in the repository."
+                exit 1
+              }
+
+              Write-Host "Found .csproj files:"
+              $projects | ForEach-Object {
+                Write-Host $_.FullName
+              }
+
+              Write-Host "============================================================"
+            displayName: Debug project path
+
+          - task: UseDotNet@2
+            displayName: Install .NET SDK 10.x
+            inputs:
+              packageType: sdk
+              version: '10.0.x'
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 3 - DOTNET INFO"
+              Write-Host "============================================================"
+              dotnet --info
+              Write-Host "============================================================"
+            displayName: Print dotnet info
+
+          - task: DotNetCoreCLI@2
+            displayName: Restore backend
+            inputs:
+              command: restore
+              projects: '$(projectPath)'
+
+          - task: DotNetCoreCLI@2
+            displayName: Build backend
+            inputs:
+              command: build
+              projects: '$(projectPath)'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: Publish backend
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: '$(projectPath)'
+              arguments: '--configuration $(buildConfiguration) --output $(publishDirectory) --no-build'
+              zipAfterPublish: false
+              modifyOutputPath: false
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 4 - INSPECT PUBLISH OUTPUT"
+              Write-Host "============================================================"
+
+              if (!(Test-Path "$(publishDirectory)")) {
+                Write-Error "Publish directory was not created."
+                exit 1
+              }
+
+              Write-Host "Publish directory:"
+              Write-Host "$(publishDirectory)"
+              Write-Host ""
+
+              Get-ChildItem "$(publishDirectory)" -Recurse | ForEach-Object {
+                Write-Host $_.FullName
+              }
+
+              $mainDll = Get-ChildItem "$(publishDirectory)" -Recurse -Filter "AzureQuotes.Api.dll" | Select-Object -First 1
+
+              if ($null -eq $mainDll) {
+                Write-Error "AzureQuotes.Api.dll was not found in publish output."
+                exit 1
+              }
+
+              Write-Host ""
+              Write-Host "Main DLL found:"
+              Write-Host $mainDll.FullName
+              Write-Host "============================================================"
+            displayName: Inspect publish output
+
+          - task: ArchiveFiles@2
+            displayName: Create backend ZIP
+            inputs:
+              rootFolderOrFile: '$(publishDirectory)'
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: '$(packagePath)'
+              replaceExistingArchive: true
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 5 - INSPECT BACKEND ZIP"
+              Write-Host "============================================================"
+
+              if (!(Test-Path "$(packagePath)")) {
+                Write-Error "Backend ZIP was not created."
+                exit 1
+              }
+
+              $package = Get-Item "$(packagePath)"
+
+              Write-Host "Package path:"
+              Write-Host "$(packagePath)"
+              Write-Host ""
+              Write-Host "Package size bytes:"
+              Write-Host $package.Length
+              Write-Host "============================================================"
+            displayName: Inspect backend ZIP
+
+          - publish: '$(packagePath)'
+            displayName: Publish backend artifact
+            artifact: backend-drop
+
+  - stage: Deploy
+    displayName: Deploy Backend
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployBackend
+        displayName: Deploy Backend to Azure App Service
+        environment: '$(environmentName)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: backend-drop
+                  displayName: Download backend artifact
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    function Test-RequiredValue {
+                      param(
+                        [string]$Name,
+                        [string]$Value,
+                        [string]$Example
+                      )
+
+                      if ([string]::IsNullOrWhiteSpace($Value)) {
+                        Write-Error "$Name is empty. Add $Name to vars-backend. Example: $Example"
+                        exit 1
+                      }
+
+                      if ($Value -match '^\$\([^)]+\)$') {
+                        Write-Error "$Name was not resolved by Azure DevOps. Current value: $Value. Add $Name to vars-backend. Example: $Example"
+                        exit 1
+                      }
+                    }
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 6 - VALIDATING VARIABLE GROUP"
+                    Write-Host "============================================================"
+
+                    $serviceConnection = $env:SERVICE_CONNECTION
+                    $resourceGroupName = $env:RESOURCE_GROUP_NAME
+                    $webAppName = $env:WEB_APP_NAME
+                    $backendBaseUrl = $env:BACKEND_BASE_URL
+                    $frontendBaseUrl = $env:FRONTEND_BASE_URL
+                    $environmentName = $env:ENVIRONMENT_NAME
+                    $photoStorageBackend = $env:PHOTO_STORAGE_BACKEND
+                    $storageContainerName = $env:AZURE_STORAGE_CONTAINER_NAME
+                    $maxPhotoMb = $env:MAX_PHOTO_MB
+                    $logLevel = $env:LOG_LEVEL
+
+                    Write-Host "serviceConnection:"
+                    Write-Host $serviceConnection
+                    Write-Host ""
+
+                    Write-Host "resourceGroupName:"
+                    Write-Host $resourceGroupName
+                    Write-Host ""
+
+                    Write-Host "webAppName:"
+                    Write-Host $webAppName
+                    Write-Host ""
+
+                    Write-Host "BACKEND_BASE_URL:"
+                    Write-Host $backendBaseUrl
+                    Write-Host ""
+
+                    Write-Host "FRONTEND_BASE_URL:"
+                    Write-Host $frontendBaseUrl
+                    Write-Host ""
+
+                    Write-Host "environmentName:"
+                    Write-Host $environmentName
+                    Write-Host ""
+
+                    Write-Host "PHOTO_STORAGE_BACKEND:"
+                    Write-Host $photoStorageBackend
+                    Write-Host ""
+
+                    Write-Host "AZURE_STORAGE_CONTAINER_NAME:"
+                    Write-Host $storageContainerName
+                    Write-Host ""
+
+                    Write-Host "maxPhotoMb:"
+                    Write-Host $maxPhotoMb
+                    Write-Host ""
+
+                    Write-Host "logLevel:"
+                    Write-Host $logLevel
+                    Write-Host ""
+
+                    Test-RequiredValue -Name "serviceConnection" -Value $serviceConnection -Example "<azure-service-connection>"
+                    Test-RequiredValue -Name "resourceGroupName" -Value $resourceGroupName -Example "<resource-group-name>"
+                    Test-RequiredValue -Name "webAppName" -Value $webAppName -Example "<backend-app-name>"
+                    Test-RequiredValue -Name "BACKEND_BASE_URL" -Value $backendBaseUrl -Example "https://<backend-app>.azurewebsites.net"
+                    Test-RequiredValue -Name "FRONTEND_BASE_URL" -Value $frontendBaseUrl -Example "https://<frontend-app>.azurewebsites.net"
+                    Test-RequiredValue -Name "environmentName" -Value $environmentName -Example "production"
+                    Test-RequiredValue -Name "PHOTO_STORAGE_BACKEND" -Value $photoStorageBackend -Example "azure"
+                    Test-RequiredValue -Name "AZURE_STORAGE_CONTAINER_NAME" -Value $storageContainerName -Example "photos"
+                    Test-RequiredValue -Name "maxPhotoMb" -Value $maxPhotoMb -Example "4"
+                    Test-RequiredValue -Name "logLevel" -Value $logLevel -Example "Information"
+
+                    if ([string]::IsNullOrWhiteSpace($env:JWT_SECRET_KEY)) {
+                      Write-Error "JWT_SECRET_KEY is empty."
+                      exit 1
+                    }
+
+                    $jwtBytes = [System.Text.Encoding]::UTF8.GetBytes($env:JWT_SECRET_KEY)
+
+                    if ($jwtBytes.Length -lt 16) {
+                      Write-Error "JWT_SECRET_KEY is too short. HS256 requires at least 128 bits / 16 bytes. Use 32+ characters."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:ADMIN_SETUP_KEY)) {
+                      Write-Error "ADMIN_SETUP_KEY is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_SQL_CONNECTION_STRING)) {
+                      Write-Error "AZURE_SQL_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:STORAGE_CONNECTION_STRING)) {
+                      Write-Error "STORAGE_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    Write-Host "JWT_SECRET_KEY: present, byte length $($jwtBytes.Length)"
+                    Write-Host "ADMIN_SETUP_KEY: present, length $($env:ADMIN_SETUP_KEY.Length)"
+                    Write-Host "AZURE_SQL_CONNECTION_STRING: present"
+                    Write-Host "STORAGE_CONNECTION_STRING: present"
+                    Write-Host "Variable validation completed successfully."
+                    Write-Host "============================================================"
+                  displayName: Validate deployment variables
+                  env:
+                    SERVICE_CONNECTION: $(serviceConnection)
+                    RESOURCE_GROUP_NAME: $(resourceGroupName)
+                    WEB_APP_NAME: $(webAppName)
+                    BACKEND_BASE_URL: $(BACKEND_BASE_URL)
+                    FRONTEND_BASE_URL: $(FRONTEND_BASE_URL)
+                    ENVIRONMENT_NAME: $(environmentName)
+                    PHOTO_STORAGE_BACKEND: $(PHOTO_STORAGE_BACKEND)
+                    AZURE_STORAGE_CONTAINER_NAME: $(AZURE_STORAGE_CONTAINER_NAME)
+                    MAX_PHOTO_MB: $(maxPhotoMb)
+                    LOG_LEVEL: $(logLevel)
+                    JWT_SECRET_KEY: $(JWT_SECRET_KEY)
+                    ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+                    AZURE_SQL_CONNECTION_STRING: $(AZURE_SQL_CONNECTION_STRING)
+                    STORAGE_CONNECTION_STRING: $(STORAGE_CONNECTION_STRING)
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 7 - NORMALIZING BACKEND AND FRONTEND URLS"
+                    Write-Host "============================================================"
+
+                    $backendBaseUrl = $env:BACKEND_BASE_URL.Trim()
+                    $frontendBaseUrl = $env:FRONTEND_BASE_URL.Trim()
+
+                    if ($backendBaseUrl -notmatch '^https?://') {
+                      $backendBaseUrl = "https://$backendBaseUrl"
+                    }
+
+                    if ($frontendBaseUrl -notmatch '^https?://') {
+                      $frontendBaseUrl = "https://$frontendBaseUrl"
+                    }
+
+                    $backendBaseUrl = $backendBaseUrl.TrimEnd("/")
+                    $frontendBaseUrl = $frontendBaseUrl.TrimEnd("/")
+
+                    $allowedOrigins = "$frontendBaseUrl,$backendBaseUrl"
+
+                    Write-Host "Normalized backend URL:"
+                    Write-Host $backendBaseUrl
+
+                    Write-Host "Normalized frontend URL:"
+                    Write-Host $frontendBaseUrl
+
+                    Write-Host "Allowed CORS origins:"
+                    Write-Host $allowedOrigins
+
+                    Write-Host "##vso[task.setvariable variable=NormalizedBackendBaseUrl]$backendBaseUrl"
+                    Write-Host "##vso[task.setvariable variable=NormalizedFrontendBaseUrl]$frontendBaseUrl"
+                    Write-Host "##vso[task.setvariable variable=AllowedOrigins]$allowedOrigins"
+
+                    Write-Host "============================================================"
+                  displayName: Normalize backend/frontend URLs
+                  env:
+                    BACKEND_BASE_URL: $(BACKEND_BASE_URL)
+                    FRONTEND_BASE_URL: $(FRONTEND_BASE_URL)
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 8 - DEPLOY CONTEXT"
+                    Write-Host "============================================================"
+                    Write-Host "Service connection variable name: serviceConnection"
+                    Write-Host "Service connection value: $env:SERVICE_CONNECTION"
+                    Write-Host "Resource group: $env:RESOURCE_GROUP_NAME"
+                    Write-Host "Backend App Service: $env:WEB_APP_NAME"
+                    Write-Host "Backend Base URL: $(NormalizedBackendBaseUrl)"
+                    Write-Host "Frontend Base URL: $(NormalizedFrontendBaseUrl)"
+                    Write-Host "Allowed Origins: $(AllowedOrigins)"
+                    Write-Host "Artifact package: $(Pipeline.Workspace)/backend-drop/backend.zip"
+                    Write-Host "============================================================"
+                  displayName: Print deploy context
+                  env:
+                    SERVICE_CONNECTION: $(serviceConnection)
+                    RESOURCE_GROUP_NAME: $(resourceGroupName)
+                    WEB_APP_NAME: $(webAppName)
+
+                - task: AzureWebApp@1
+                  displayName: Deploy backend ZIP to Azure App Service
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    appType: webAppLinux
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/backend-drop/backend.zip'
+                    runtimeStack: 'DOTNETCORE|10.0'
+                    startUpCommand: 'dotnet AzureQuotes.Api.dll'
+
+                - task: AzureAppServiceSettings@1
+                  displayName: Configure backend App Settings
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    appName: '$(webAppName)'
+                    resourceGroupName: '$(resourceGroupName)'
+                    appSettings: |
+                      [
+                        {
+                          "name": "DOTNET_ENVIRONMENT",
+                          "value": "Production",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ASPNETCORE_URLS",
+                          "value": "http://0.0.0.0:8080",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITES_PORT",
+                          "value": "8080",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITES_CONTAINER_START_TIME_LIMIT",
+                          "value": "600",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITE_WARMUP_PATH",
+                          "value": "/health",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ENVIRONMENT",
+                          "value": "production",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FRONTEND_BASE_URL",
+                          "value": "$(AllowedOrigins)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "BACKEND_BASE_URL",
+                          "value": "$(NormalizedBackendBaseUrl)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "JWT_SECRET_KEY",
+                          "value": "$(JWT_SECRET_KEY)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ADMIN_SETUP_KEY",
+                          "value": "$(ADMIN_SETUP_KEY)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_SQL_CONNECTION_STRING",
+                          "value": "$(AZURE_SQL_CONNECTION_STRING)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "PHOTO_STORAGE_BACKEND",
+                          "value": "$(PHOTO_STORAGE_BACKEND)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_STORAGE_CONNECTION_STRING",
+                          "value": "$(STORAGE_CONNECTION_STRING)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_STORAGE_CONTAINER_NAME",
+                          "value": "$(AZURE_STORAGE_CONTAINER_NAME)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "MAX_PHOTO_MB",
+                          "value": "$(maxPhotoMb)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "LOG_LEVEL",
+                          "value": "$(logLevel)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_REFRESH_SECONDS",
+                          "value": "10",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PUBLIC_FEED_ENABLED",
+                          "value": "true",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PHOTO_UPLOAD_ENABLED",
+                          "value": "true",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_MAINTENANCEMODE_ENABLED",
+                          "value": "false",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ENABLE_ORYX_BUILD",
+                          "value": "false",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                          "value": "false",
+                          "slotSetting": false
+                        }
+                      ]
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 9 - APP SETTINGS CONFIGURED"
+                    Write-Host "============================================================"
+                    Write-Host "Configured App Settings:"
+                    Write-Host "- DOTNET_ENVIRONMENT=Production"
+                    Write-Host "- ASPNETCORE_URLS=http://0.0.0.0:8080"
+                    Write-Host "- WEBSITES_PORT=8080"
+                    Write-Host "- WEBSITES_CONTAINER_START_TIME_LIMIT=600"
+                    Write-Host "- WEBSITE_WARMUP_PATH=/health"
+                    Write-Host "- FRONTEND_BASE_URL=$(AllowedOrigins)"
+                    Write-Host "- BACKEND_BASE_URL=$(NormalizedBackendBaseUrl)"
+                    Write-Host "- JWT_SECRET_KEY configured from secret variable"
+                    Write-Host "- ADMIN_SETUP_KEY configured from secret variable"
+                    Write-Host "- AZURE_SQL_CONNECTION_STRING configured from secret variable"
+                    Write-Host "- PHOTO_STORAGE_BACKEND=$(PHOTO_STORAGE_BACKEND)"
+                    Write-Host "- AZURE_STORAGE_CONNECTION_STRING configured from secret variable"
+                    Write-Host "- AZURE_STORAGE_CONTAINER_NAME=$(AZURE_STORAGE_CONTAINER_NAME)"
+                    Write-Host "- MAX_PHOTO_MB=$(maxPhotoMb)"
+                    Write-Host "- LOG_LEVEL=$(logLevel)"
+                    Write-Host "- ENABLE_ORYX_BUILD=false"
+                    Write-Host "- SCM_DO_BUILD_DURING_DEPLOYMENT=false"
+                    Write-Host "============================================================"
+                  displayName: Explain configured App Settings
+
+                - task: AzureAppServiceManage@0
+                  displayName: Restart backend App Service
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    Action: 'Restart Azure App Service'
+                    WebAppName: '$(webAppName)'
+                    ResourceGroupName: '$(resourceGroupName)'
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 10 - WAITING FOR BACKEND HEALTH"
+                    Write-Host "============================================================"
+
+                    $healthUrl = "$(NormalizedBackendBaseUrl)/health"
+
+                    Write-Host "Health URL:"
+                    Write-Host $healthUrl
+
+                    $maxAttempts = 30
+                    $delaySeconds = 10
+
+                    for ($i = 1; $i -le $maxAttempts; $i++) {
+                      Write-Host "------------------------------------------------------------"
+                      Write-Host "Health attempt $i of $maxAttempts"
+
+                      try {
+                        $response = Invoke-WebRequest `
+                          -Method Get `
+                          -Uri $healthUrl `
+                          -TimeoutSec 20 `
+                          -UseBasicParsing
+
+                        Write-Host "HTTP status code:"
+                        Write-Host $response.StatusCode
+
+                        Write-Host "Response body:"
+                        Write-Host $response.Content
+
+                        if ($response.StatusCode -eq 200) {
+                          Write-Host "Backend is healthy."
+                          Write-Host "============================================================"
+                          exit 0
+                        }
+                      }
+                      catch {
+                        Write-Host "Health attempt failed."
+                        Write-Host $_.Exception.Message
+                      }
+
+                      Write-Host "Waiting $delaySeconds seconds..."
+                      Start-Sleep -Seconds $delaySeconds
+                    }
+
+                    Write-Error "Backend did not become healthy in time."
+                    exit 1
+                  displayName: Validate backend health
+
+                - powershell: |
+                    $ErrorActionPreference = "Continue"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 11 - OPTIONAL DATABASE HEALTH CHECK"
+                    Write-Host "============================================================"
+
+                    $dbHealthUrl = "$(NormalizedBackendBaseUrl)/health/db"
+
+                    Write-Host "DB Health URL:"
+                    Write-Host $dbHealthUrl
+
+                    try {
+                      $response = Invoke-WebRequest `
+                        -Method Get `
+                        -Uri $dbHealthUrl `
+                        -TimeoutSec 60 `
+                        -UseBasicParsing
+
+                      Write-Host "HTTP status code:"
+                      Write-Host $response.StatusCode
+
+                      Write-Host "Response body:"
+                      Write-Host $response.Content
+                    }
+                    catch {
+                      Write-Host "DB health check failed."
+                      Write-Host "This does not necessarily mean deployment failed, but Azure SQL should be reviewed."
+                      Write-Host $_.Exception.Message
+                    }
+
+                    Write-Host "============================================================"
+                  displayName: Check database health after deploy
+                  continueOnError: true
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "BACKEND PIPELINE COMPLETED"
+                    Write-Host "============================================================"
+                    Write-Host "Backend URL:"
+                    Write-Host "$(NormalizedBackendBaseUrl)"
+                    Write-Host ""
+                    Write-Host "Next step if DB schema is empty:"
+                    Write-Host "Run azure-pipelines-create-schema.yml"
+                    Write-Host ""
+                    Write-Host "Then test:"
+                    Write-Host "1. /health"
+                    Write-Host "2. /health/db"
+                    Write-Host "3. /api/auth/register"
+                    Write-Host "4. /api/auth/login"
+                    Write-Host "============================================================"
+                  displayName: Print final deployment summary

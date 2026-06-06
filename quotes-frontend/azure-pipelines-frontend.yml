@@ -1,0 +1,562 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  name: self-host-agent-quotes-app
+
+variables:
+  - group: vars-frontend
+
+  - name: artifactName
+    value: frontend-drop
+
+  - name: packagePath
+    value: '$(Build.ArtifactStagingDirectory)/frontend.zip'
+
+  - name: appArtifactPath
+    value: '$(Build.ArtifactStagingDirectory)/app'
+
+stages:
+  - stage: Build
+    displayName: Build frontend
+    jobs:
+      - job: BuildFrontend
+        displayName: Install and build React app
+        steps:
+          - checkout: self
+            displayName: Checkout repository
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - FRONTEND PIPELINE CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "This pipeline builds and deploys the React frontend."
+              Write-Host "Pipeline name:"
+              Write-Host "$(Build.DefinitionName)"
+              Write-Host ""
+              Write-Host "Build number:"
+              Write-Host "$(Build.BuildNumber)"
+              Write-Host ""
+              Write-Host "Agent name:"
+              Write-Host "$(Agent.Name)"
+              Write-Host ""
+              Write-Host "Agent OS:"
+              Write-Host "$(Agent.OS)"
+              Write-Host ""
+              Write-Host "Source branch:"
+              Write-Host "$(Build.SourceBranch)"
+              Write-Host ""
+              Write-Host "Source version:"
+              Write-Host "$(Build.SourceVersion)"
+              Write-Host ""
+              Write-Host "Artifact name:"
+              Write-Host "$(artifactName)"
+              Write-Host ""
+              Write-Host "Package path:"
+              Write-Host "$(packagePath)"
+              Write-Host ""
+              Write-Host "App artifact path:"
+              Write-Host "$(appArtifactPath)"
+              Write-Host "============================================================"
+            displayName: Print frontend pipeline context
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 2 - RESOLVING FRONTEND DIRECTORY"
+              Write-Host "============================================================"
+              Write-Host "Repository root:"
+              Write-Host "$(Build.SourcesDirectory)"
+
+              Write-Host ""
+              Write-Host "Files in repository root:"
+              Get-ChildItem "$(Build.SourcesDirectory)" | ForEach-Object {
+                Write-Host $_.FullName
+              }
+
+              $frontendDir = "$(Build.SourcesDirectory)"
+              $packageJsonPath = Join-Path $frontendDir "package.json"
+
+              Write-Host ""
+              Write-Host "Expected package.json path:"
+              Write-Host $packageJsonPath
+
+              if (!(Test-Path $packageJsonPath)) {
+                Write-Error "package.json was not found in $(Build.SourcesDirectory). Verify that the frontend files are committed in this repo."
+                exit 1
+              }
+
+              $serverPath = Join-Path $frontendDir "server.mjs"
+
+              Write-Host ""
+              Write-Host "Expected server.mjs path:"
+              Write-Host $serverPath
+
+              if (!(Test-Path $serverPath)) {
+                Write-Error "server.mjs was not found in $(Build.SourcesDirectory)."
+                exit 1
+              }
+
+              Write-Host ""
+              Write-Host "Frontend directory resolved successfully:"
+              Write-Host $frontendDir
+
+              Write-Host "##vso[task.setvariable variable=resolvedFrontendDir]$frontendDir"
+              Write-Host "============================================================"
+            displayName: Resolve frontend directory
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 3 - FRONTEND VARIABLES SUMMARY"
+              Write-Host "============================================================"
+              Write-Host "This step prints the non-secret variables used by the frontend pipeline."
+              Write-Host ""
+              Write-Host "apiBaseUrl:"
+              Write-Host "$(apiBaseUrl)"
+              Write-Host ""
+              Write-Host "azureServiceConnection:"
+              Write-Host "$(azureServiceConnection)"
+              Write-Host ""
+              Write-Host "environmentName:"
+              Write-Host "$(environmentName)"
+              Write-Host ""
+              Write-Host "nodeVersion:"
+              Write-Host "$(nodeVersion)"
+              Write-Host ""
+              Write-Host "resourceGroupName:"
+              Write-Host "$(resourceGroupName)"
+              Write-Host ""
+              Write-Host "webAppName:"
+              Write-Host "$(webAppName)"
+              Write-Host ""
+              Write-Host "featurePublicFeedEnabled:"
+              Write-Host "$(featurePublicFeedEnabled)"
+              Write-Host ""
+              Write-Host "featurePhotoUploadEnabled:"
+              Write-Host "$(featurePhotoUploadEnabled)"
+              Write-Host ""
+              Write-Host "featureMaintenanceModeEnabled:"
+              Write-Host "$(featureMaintenanceModeEnabled)"
+              Write-Host ""
+              Write-Host "App Configuration variables will be configured if values exist in vars-frontend."
+              Write-Host "Connection string values are not printed."
+              Write-Host "============================================================"
+            displayName: Print frontend variables summary
+
+          - task: NodeTool@0
+            displayName: Use Node.js
+            inputs:
+              versionSpec: '$(nodeVersion)'
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 4 - INSTALLING FRONTEND DEPENDENCIES"
+              Write-Host "============================================================"
+              Write-Host "Changing directory to resolved frontend directory:"
+              Write-Host "$(resolvedFrontendDir)"
+
+              Set-Location "$(resolvedFrontendDir)"
+
+              Write-Host ""
+              Write-Host "Current directory:"
+              Get-Location
+
+              Write-Host ""
+              Write-Host "Node version:"
+              node --version
+
+              Write-Host ""
+              Write-Host "NPM version:"
+              npm --version
+
+              Write-Host ""
+              if (Test-Path "package-lock.json") {
+                Write-Host "package-lock.json found. Running npm ci..."
+                npm ci
+              }
+              else {
+                Write-Host "package-lock.json not found. Running npm install..."
+                npm install
+              }
+
+              Write-Host ""
+              Write-Host "Frontend dependencies installed successfully."
+              Write-Host "============================================================"
+            displayName: Install frontend dependencies
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 5 - BUILDING REACT APP"
+              Write-Host "============================================================"
+              Write-Host "Changing directory to resolved frontend directory:"
+              Write-Host "$(resolvedFrontendDir)"
+
+              Set-Location "$(resolvedFrontendDir)"
+
+              Write-Host ""
+              Write-Host "Building frontend..."
+              Write-Host "Using backend API:"
+              Write-Host "$(apiBaseUrl)"
+
+              $env:VITE_BACKEND_URL = "$(apiBaseUrl)"
+
+              Write-Host ""
+              Write-Host "Environment variable VITE_BACKEND_URL was set for build-time configuration."
+              Write-Host "Running npm run build..."
+              npm run build
+
+              Write-Host ""
+              Write-Host "Validating dist folder..."
+
+              if (!(Test-Path "dist")) {
+                Write-Error "Build failed. dist folder was not created."
+                exit 1
+              }
+
+              Write-Host "dist folder was created successfully."
+              Write-Host ""
+              Write-Host "dist content:"
+              Get-ChildItem "dist" -Recurse | ForEach-Object {
+                Write-Host $_.FullName
+              }
+
+              Write-Host ""
+              Write-Host "Build completed successfully."
+              Write-Host "============================================================"
+            displayName: Build React app
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 6 - PREPARING FRONTEND ARTIFACT"
+              Write-Host "============================================================"
+
+              $frontendDir = "$(resolvedFrontendDir)"
+              $artifactPath = "$(appArtifactPath)"
+
+              Write-Host "Frontend directory:"
+              Write-Host $frontendDir
+              Write-Host ""
+              Write-Host "Artifact path:"
+              Write-Host $artifactPath
+
+              if (Test-Path $artifactPath) {
+                Write-Host ""
+                Write-Host "Existing artifact path found. Removing previous content..."
+                Remove-Item $artifactPath -Recurse -Force
+              }
+
+              Write-Host ""
+              Write-Host "Creating artifact directory..."
+              New-Item -ItemType Directory -Force -Path $artifactPath | Out-Null
+
+              Write-Host ""
+              Write-Host "Copying dist folder..."
+              Copy-Item -Path "$frontendDir\dist" -Destination "$artifactPath\dist" -Recurse -Force
+
+              Write-Host "Copying node_modules folder..."
+              Copy-Item -Path "$frontendDir\node_modules" -Destination "$artifactPath\node_modules" -Recurse -Force
+
+              Write-Host "Copying package.json..."
+              Copy-Item -Path "$frontendDir\package.json" -Destination "$artifactPath\package.json" -Force
+
+              Write-Host "Copying server.mjs..."
+              Copy-Item -Path "$frontendDir\server.mjs" -Destination "$artifactPath\server.mjs" -Force
+
+              if (Test-Path "$frontendDir\package-lock.json") {
+                Write-Host "Copying package-lock.json..."
+                Copy-Item -Path "$frontendDir\package-lock.json" -Destination "$artifactPath\package-lock.json" -Force
+              }
+              else {
+                Write-Host "package-lock.json was not found. Skipping package-lock copy."
+              }
+
+              Write-Host ""
+              Write-Host "Artifact content:"
+              Get-ChildItem $artifactPath -Recurse | ForEach-Object {
+                Write-Host $_.FullName
+              }
+
+              Write-Host ""
+              Write-Host "Frontend artifact prepared successfully."
+              Write-Host "============================================================"
+            displayName: Prepare frontend artifact
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 7 - READY TO CREATE FRONTEND ZIP"
+              Write-Host "============================================================"
+              Write-Host "The pipeline will now compress the prepared frontend artifact."
+              Write-Host "Root folder:"
+              Write-Host "$(appArtifactPath)"
+              Write-Host ""
+              Write-Host "ZIP destination:"
+              Write-Host "$(packagePath)"
+              Write-Host "============================================================"
+            displayName: Print ZIP preparation summary
+
+          - task: ArchiveFiles@2
+            displayName: Create frontend.zip
+            inputs:
+              rootFolderOrFile: '$(appArtifactPath)'
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: '$(packagePath)'
+              replaceExistingArchive: true
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 8 - VALIDATING FRONTEND ZIP"
+              Write-Host "============================================================"
+
+              if (!(Test-Path "$(packagePath)")) {
+                Write-Error "frontend.zip was not created."
+                exit 1
+              }
+
+              $package = Get-Item "$(packagePath)"
+
+              Write-Host "frontend.zip created successfully."
+              Write-Host ""
+              Write-Host "Package path:"
+              Write-Host "$(packagePath)"
+              Write-Host ""
+              Write-Host "Package size in bytes:"
+              Write-Host $package.Length
+              Write-Host "============================================================"
+            displayName: Validate frontend ZIP
+
+          - publish: '$(packagePath)'
+            displayName: Publish frontend artifact
+            artifact: '$(artifactName)'
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 9 - BUILD STAGE COMPLETED"
+              Write-Host "============================================================"
+              Write-Host "The frontend artifact was published successfully."
+              Write-Host "Artifact name:"
+              Write-Host "$(artifactName)"
+              Write-Host "============================================================"
+            displayName: Print build stage summary
+
+  - stage: Deploy
+    displayName: Deploy frontend
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployFrontend
+        displayName: Deploy frontend to Azure App Service
+        environment: '$(environmentName)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: '$(artifactName)'
+                  displayName: Download frontend artifact
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 10 - DEPLOY CONTEXT"
+                    Write-Host "============================================================"
+                    Write-Host "The pipeline downloaded the frontend artifact and is ready to deploy."
+                    Write-Host ""
+                    Write-Host "Azure service connection:"
+                    Write-Host "$(azureServiceConnection)"
+                    Write-Host ""
+                    Write-Host "Resource group:"
+                    Write-Host "$(resourceGroupName)"
+                    Write-Host ""
+                    Write-Host "Frontend App Service:"
+                    Write-Host "$(webAppName)"
+                    Write-Host ""
+                    Write-Host "Environment:"
+                    Write-Host "$(environmentName)"
+                    Write-Host ""
+                    Write-Host "Artifact path:"
+                    Write-Host "$(Pipeline.Workspace)/$(artifactName)/frontend.zip"
+                    Write-Host ""
+                    Write-Host "Runtime stack:"
+                    Write-Host "NODE|24-lts"
+                    Write-Host ""
+                    Write-Host "Startup command:"
+                    Write-Host "node server.mjs"
+                    Write-Host "============================================================"
+                  displayName: Print deploy context
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 11 - READY TO DEPLOY FRONTEND ZIP"
+                    Write-Host "============================================================"
+                    Write-Host "The next task will deploy frontend.zip to Azure App Service."
+                    Write-Host "Target App Service:"
+                    Write-Host "$(webAppName)"
+                    Write-Host ""
+                    Write-Host "Target Resource Group:"
+                    Write-Host "$(resourceGroupName)"
+                    Write-Host "============================================================"
+                  displayName: Print pre-deploy message
+
+                - task: AzureWebApp@1
+                  displayName: Zip deploy frontend
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: webAppLinux
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/frontend.zip'
+                    runtimeStack: 'NODE|24-lts'
+                    startUpCommand: 'node server.mjs'
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 12 - FRONTEND ZIP DEPLOY COMPLETED"
+                    Write-Host "============================================================"
+                    Write-Host "The frontend ZIP deploy task has completed."
+                    Write-Host "The pipeline will now configure frontend App Settings."
+                    Write-Host "============================================================"
+                  displayName: Print post-deploy message
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 13 - READY TO CONFIGURE FRONTEND APP SETTINGS"
+                    Write-Host "============================================================"
+                    Write-Host "The next task will configure runtime settings in Azure App Service."
+                    Write-Host ""
+                    Write-Host "Settings that will be configured:"
+                    Write-Host "- API_BASE_URL"
+                    Write-Host "- AZURE_APPCONFIG_CONNECTION_STRING"
+                    Write-Host "- AZURE_APPCONFIG_ENDPOINT"
+                    Write-Host "- FEATURE_FLAGS_REFRESH_SECONDS"
+                    Write-Host "- FEATURE_PUBLIC_FEED_ENABLED"
+                    Write-Host "- FEATURE_PHOTO_UPLOAD_ENABLED"
+                    Write-Host "- FEATURE_MAINTENANCEMODE_ENABLED"
+                    Write-Host "- WEBSITES_PORT"
+                    Write-Host "- ENABLE_ORYX_BUILD"
+                    Write-Host "- SCM_DO_BUILD_DURING_DEPLOYMENT"
+                    Write-Host ""
+                    Write-Host "Secret values are not printed."
+                    Write-Host "============================================================"
+                  displayName: Print pre-app-settings message
+
+                - task: AzureAppServiceSettings@1
+                  displayName: Configure frontend app settings
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appName: '$(webAppName)'
+                    resourceGroupName: '$(resourceGroupName)'
+                    appSettings: |
+                      [
+                        {
+                          "name": "API_BASE_URL",
+                          "value": "$(apiBaseUrl)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_APPCONFIG_CONNECTION_STRING",
+                          "value": "$(appConfigConnectionString)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_APPCONFIG_ENDPOINT",
+                          "value": "$(appConfigEndpoint)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_FLAGS_REFRESH_SECONDS",
+                          "value": "$(featureFlagsRefreshSeconds)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PUBLIC_FEED_ENABLED",
+                          "value": "$(featurePublicFeedEnabled)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PHOTO_UPLOAD_ENABLED",
+                          "value": "$(featurePhotoUploadEnabled)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_MAINTENANCEMODE_ENABLED",
+                          "value": "$(featureMaintenanceModeEnabled)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITES_PORT",
+                          "value": "8080",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ENABLE_ORYX_BUILD",
+                          "value": "false",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                          "value": "false",
+                          "slotSetting": false
+                        }
+                      ]
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 14 - FRONTEND APP SETTINGS CONFIGURED"
+                    Write-Host "============================================================"
+                    Write-Host "Frontend App Settings task completed."
+                    Write-Host ""
+                    Write-Host "Configured visible values:"
+                    Write-Host "- API_BASE_URL=$(apiBaseUrl)"
+                    Write-Host "- FEATURE_PUBLIC_FEED_ENABLED=$(featurePublicFeedEnabled)"
+                    Write-Host "- FEATURE_PHOTO_UPLOAD_ENABLED=$(featurePhotoUploadEnabled)"
+                    Write-Host "- FEATURE_MAINTENANCEMODE_ENABLED=$(featureMaintenanceModeEnabled)"
+                    Write-Host "- WEBSITES_PORT=8080"
+                    Write-Host "- ENABLE_ORYX_BUILD=false"
+                    Write-Host "- SCM_DO_BUILD_DURING_DEPLOYMENT=false"
+                    Write-Host ""
+                    Write-Host "App Configuration connection values are not printed."
+                    Write-Host "============================================================"
+                  displayName: Print post-app-settings message
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 15 - READY TO RESTART FRONTEND APP SERVICE"
+                    Write-Host "============================================================"
+                    Write-Host "The next task will restart the frontend App Service."
+                    Write-Host "App Service:"
+                    Write-Host "$(webAppName)"
+                    Write-Host ""
+                    Write-Host "Resource Group:"
+                    Write-Host "$(resourceGroupName)"
+                    Write-Host "============================================================"
+                  displayName: Print pre-restart message
+
+                - task: AzureAppServiceManage@0
+                  displayName: Restart frontend App Service
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    Action: 'Restart Azure App Service'
+                    WebAppName: '$(webAppName)'
+                    ResourceGroupName: '$(resourceGroupName)'
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 16 - FRONTEND PIPELINE COMPLETED"
+                    Write-Host "============================================================"
+                    Write-Host "Frontend deployment process completed."
+                    Write-Host ""
+                    Write-Host "Frontend App Service:"
+                    Write-Host "$(webAppName)"
+                    Write-Host ""
+                    Write-Host "Backend API configured in frontend:"
+                    Write-Host "$(apiBaseUrl)"
+                    Write-Host ""
+                    Write-Host "Next manual validations:"
+                    Write-Host "1. Open the frontend URL."
+                    Write-Host "2. Open /config.js if your server.mjs exposes runtime config."
+                    Write-Host "3. Test register/login from the browser."
+                    Write-Host "4. Check browser Network tab if API calls fail."
+                    Write-Host "============================================================"
+                  displayName: Print final frontend summary

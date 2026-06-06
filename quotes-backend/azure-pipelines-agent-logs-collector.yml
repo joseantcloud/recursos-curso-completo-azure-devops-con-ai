@@ -1,0 +1,616 @@
+trigger: none
+pr: none
+
+pool:
+  name: self-host-agent-quotes-app
+
+variables:
+  - group: vars-ai
+
+  - name: artifactName
+    value: ai-agent-log-review
+
+  - name: logsZipPath
+    value: '$(Build.ArtifactStagingDirectory)/backend-logs.zip'
+
+  - name: extractedLogsPath
+    value: '$(Build.ArtifactStagingDirectory)/backend-logs'
+
+  - name: agentInputPath
+    value: '$(Build.ArtifactStagingDirectory)/agent-input.txt'
+
+  - name: reportMarkdownPath
+    value: '$(Build.ArtifactStagingDirectory)/ai-devops-log-review.md'
+
+  - name: reportHtmlPath
+    value: '$(Build.ArtifactStagingDirectory)/ai-devops-log-review.html'
+
+stages:
+  - stage: AgentLogsCollector
+    displayName: AI Agent - Backend Logs Collector
+    jobs:
+      - job: CollectAnalyzeReport
+        displayName: Collect backend logs and generate AI report
+        steps:
+          - checkout: none
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - AGENT PIPELINE CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "Pipeline name:"
+              Write-Host "$(Build.DefinitionName)"
+              Write-Host ""
+              Write-Host "Build number:"
+              Write-Host "$(Build.BuildNumber)"
+              Write-Host ""
+              Write-Host "Agent name:"
+              Write-Host "$(Agent.Name)"
+              Write-Host ""
+              Write-Host "Agent OS:"
+              Write-Host "$(Agent.OS)"
+              Write-Host ""
+              Write-Host "Target backend Web App:"
+              Write-Host "$(targetBackendWebAppName)"
+              Write-Host ""
+              Write-Host "Target resource group:"
+              Write-Host "$(targetResourceGroupName)"
+              Write-Host ""
+              Write-Host "Target backend base URL:"
+              Write-Host "$(targetBackendBaseUrl)"
+              Write-Host ""
+              Write-Host "Azure OpenAI endpoint:"
+              Write-Host "$(AZURE_OPENAI_ENDPOINT)"
+              Write-Host ""
+              Write-Host "Azure OpenAI deployment:"
+              Write-Host "$(AZURE_OPENAI_DEPLOYMENT_NAME)"
+              Write-Host ""
+              Write-Host "Azure OpenAI API version:"
+              Write-Host "$(AZURE_OPENAI_API_VERSION)"
+              Write-Host ""
+              Write-Host "Secrets are not printed."
+              Write-Host "============================================================"
+            displayName: Print agent pipeline context
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              function Test-RequiredValue {
+                param(
+                  [string]$Name,
+                  [string]$Value
+                )
+
+                if ([string]::IsNullOrWhiteSpace($Value)) {
+                  Write-Error "$Name is required in vars-ai."
+                  exit 1
+                }
+
+                if ($Value -match '^\$\([^)]+\)$') {
+                  Write-Error "$Name was not resolved. Current value: $Value"
+                  exit 1
+                }
+              }
+
+              Write-Host "============================================================"
+              Write-Host "STEP 2 - VALIDATING VARS-AI"
+              Write-Host "============================================================"
+
+              Test-RequiredValue -Name "azureServiceConnection" -Value "$(azureServiceConnection)"
+              Test-RequiredValue -Name "targetResourceGroupName" -Value "$(targetResourceGroupName)"
+              Test-RequiredValue -Name "targetBackendWebAppName" -Value "$(targetBackendWebAppName)"
+              Test-RequiredValue -Name "targetBackendBaseUrl" -Value "$(targetBackendBaseUrl)"
+              Test-RequiredValue -Name "AZURE_OPENAI_ENDPOINT" -Value "$(AZURE_OPENAI_ENDPOINT)"
+              Test-RequiredValue -Name "AZURE_OPENAI_DEPLOYMENT_NAME" -Value "$(AZURE_OPENAI_DEPLOYMENT_NAME)"
+              Test-RequiredValue -Name "AZURE_OPENAI_API_VERSION" -Value "$(AZURE_OPENAI_API_VERSION)"
+
+              if ([string]::IsNullOrWhiteSpace($env:AZURE_OPENAI_API_KEY)) {
+                Write-Error "AZURE_OPENAI_API_KEY is required in vars-ai and must be marked secret."
+                exit 1
+              }
+
+              Write-Host "All required vars-ai values are present."
+              Write-Host "AZURE_OPENAI_API_KEY is present but not printed."
+              Write-Host "============================================================"
+            displayName: Validate vars-ai
+            env:
+              AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+
+          - task: AzureCLI@2
+            displayName: Collect backend App Service logs
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                $ErrorActionPreference = "Continue"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 3 - CONNECTED TO AZURE SUBSCRIPTION"
+                Write-Host "============================================================"
+                Write-Host "Current Azure account:"
+                az account show --query "{name:name, tenantId:tenantId, user:user.name}" -o json
+                Write-Host "============================================================"
+
+                $resourceGroupName = "$(targetResourceGroupName)"
+                $webAppName = "$(targetBackendWebAppName)"
+                $backendBaseUrl = "$(targetBackendBaseUrl)".TrimEnd("/")
+
+                $logsZipPath = "$(logsZipPath)"
+                $extractedLogsPath = "$(extractedLogsPath)"
+                $agentInputPath = "$(agentInputPath)"
+
+                $maxFiles = [int]"$(AI_REPORT_MAX_FILES)"
+                $maxLinesPerFile = [int]"$(AI_REPORT_MAX_LINES_PER_FILE)"
+                $maxChars = [int]"$(AI_REPORT_MAX_LOG_CHARS)"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 4 - TARGET BACKEND CONTEXT"
+                Write-Host "============================================================"
+                Write-Host "Resource group:"
+                Write-Host $resourceGroupName
+                Write-Host ""
+                Write-Host "Backend Web App:"
+                Write-Host $webAppName
+                Write-Host ""
+                Write-Host "Backend URL:"
+                Write-Host $backendBaseUrl
+                Write-Host ""
+                Write-Host "Logs ZIP path:"
+                Write-Host $logsZipPath
+                Write-Host ""
+                Write-Host "Extracted logs path:"
+                Write-Host $extractedLogsPath
+                Write-Host "============================================================"
+
+                if (Test-Path $extractedLogsPath) {
+                  Remove-Item $extractedLogsPath -Recurse -Force
+                }
+
+                New-Item -ItemType Directory -Force -Path $extractedLogsPath | Out-Null
+
+                Write-Host "============================================================"
+                Write-Host "STEP 5 - SHOW APP SERVICE LOG CONFIGURATION"
+                Write-Host "============================================================"
+                az webapp log show `
+                  --resource-group $resourceGroupName `
+                  --name $webAppName `
+                  -o json
+                Write-Host "============================================================"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 6 - CHECK BACKEND HEALTH ENDPOINTS"
+                Write-Host "============================================================"
+
+                $healthBody = ""
+                $dbHealthBody = ""
+
+                try {
+                  $healthUrl = "$backendBaseUrl/health"
+                  Write-Host "Calling:"
+                  Write-Host $healthUrl
+
+                  $healthResponse = Invoke-WebRequest `
+                    -Method Get `
+                    -Uri $healthUrl `
+                    -TimeoutSec 30 `
+                    -UseBasicParsing
+
+                  Write-Host "Health status code:"
+                  Write-Host $healthResponse.StatusCode
+
+                  $healthBody = $healthResponse.Content
+                  Write-Host "Health body:"
+                  Write-Host $healthBody
+                }
+                catch {
+                  $healthBody = "Health check failed: $($_.Exception.Message)"
+                  Write-Host $healthBody
+                }
+
+                try {
+                  $dbHealthUrl = "$backendBaseUrl/health/db"
+                  Write-Host ""
+                  Write-Host "Calling:"
+                  Write-Host $dbHealthUrl
+
+                  $dbHealthResponse = Invoke-WebRequest `
+                    -Method Get `
+                    -Uri $dbHealthUrl `
+                    -TimeoutSec 60 `
+                    -UseBasicParsing
+
+                  Write-Host "DB health status code:"
+                  Write-Host $dbHealthResponse.StatusCode
+
+                  $dbHealthBody = $dbHealthResponse.Content
+                  Write-Host "DB health body:"
+                  Write-Host $dbHealthBody
+                }
+                catch {
+                  $dbHealthBody = "DB health check failed: $($_.Exception.Message)"
+                  Write-Host $dbHealthBody
+                }
+
+                Write-Host "============================================================"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 7 - COLLECT SAFE APP SETTING NAMES"
+                Write-Host "============================================================"
+
+                $appSettingNames = ""
+                try {
+                  $appSettingNames = az webapp config appsettings list `
+                    --resource-group $resourceGroupName `
+                    --name $webAppName `
+                    --query "[].name" `
+                    -o tsv
+
+                  Write-Host "Collected App Setting names only. Values are not printed."
+                  $appSettingNames
+                }
+                catch {
+                  $appSettingNames = "Could not collect App Setting names: $($_.Exception.Message)"
+                  Write-Host $appSettingNames
+                }
+
+                Write-Host "============================================================"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 8 - DOWNLOAD APP SERVICE LOGS"
+                Write-Host "============================================================"
+
+                if (Test-Path $logsZipPath) {
+                  Remove-Item $logsZipPath -Force
+                }
+
+                try {
+                  az webapp log download `
+                    --resource-group $resourceGroupName `
+                    --name $webAppName `
+                    --log-file $logsZipPath
+
+                  if (Test-Path $logsZipPath) {
+                    $zip = Get-Item $logsZipPath
+                    Write-Host "Logs ZIP downloaded."
+                    Write-Host "ZIP size bytes:"
+                    Write-Host $zip.Length
+                  }
+                  else {
+                    Write-Host "Logs ZIP was not created."
+                  }
+                }
+                catch {
+                  Write-Host "az webapp log download failed."
+                  Write-Host $_.Exception.Message
+                }
+
+                if (Test-Path $logsZipPath) {
+                  try {
+                    Expand-Archive `
+                      -Path $logsZipPath `
+                      -DestinationPath $extractedLogsPath `
+                      -Force
+
+                    Write-Host "Logs extracted successfully."
+                  }
+                  catch {
+                    Write-Host "Could not extract logs ZIP."
+                    Write-Host $_.Exception.Message
+                  }
+                }
+
+                Write-Host "============================================================"
+
+                Write-Host "============================================================"
+                Write-Host "STEP 9 - BUILD AI AGENT INPUT"
+                Write-Host "============================================================"
+
+                $logTextBuilder = New-Object System.Text.StringBuilder
+
+                [void]$logTextBuilder.AppendLine("AZURE QUOTES APP - BACKEND LOG REVIEW INPUT")
+                [void]$logTextBuilder.AppendLine("Generated at UTC: $(Get-Date -AsUTC -Format o)")
+                [void]$logTextBuilder.AppendLine("")
+                [void]$logTextBuilder.AppendLine("TARGET")
+                [void]$logTextBuilder.AppendLine("Resource group: $resourceGroupName")
+                [void]$logTextBuilder.AppendLine("Backend Web App: $webAppName")
+                [void]$logTextBuilder.AppendLine("Backend URL: $backendBaseUrl")
+                [void]$logTextBuilder.AppendLine("")
+                [void]$logTextBuilder.AppendLine("HEALTH")
+                [void]$logTextBuilder.AppendLine($healthBody)
+                [void]$logTextBuilder.AppendLine("")
+                [void]$logTextBuilder.AppendLine("DB HEALTH")
+                [void]$logTextBuilder.AppendLine($dbHealthBody)
+                [void]$logTextBuilder.AppendLine("")
+                [void]$logTextBuilder.AppendLine("APP SETTING NAMES ONLY - NO VALUES")
+                [void]$logTextBuilder.AppendLine($appSettingNames)
+                [void]$logTextBuilder.AppendLine("")
+                [void]$logTextBuilder.AppendLine("RECENT LOG EXTRACTS")
+                [void]$logTextBuilder.AppendLine("")
+
+                $files = @()
+
+                if (Test-Path $extractedLogsPath) {
+                  $files = Get-ChildItem $extractedLogsPath -Recurse -File |
+                    Where-Object {
+                      $_.Extension -in ".log", ".txt", ".json", ".xml", ".htm", ".html"
+                    } |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First $maxFiles
+                }
+
+                if ($files.Count -eq 0) {
+                  [void]$logTextBuilder.AppendLine("No log files were found in the downloaded package.")
+                }
+                else {
+                  foreach ($file in $files) {
+                    [void]$logTextBuilder.AppendLine("------------------------------------------------------------")
+                    [void]$logTextBuilder.AppendLine("FILE: $($file.FullName)")
+                    [void]$logTextBuilder.AppendLine("LAST WRITE UTC: $($file.LastWriteTimeUtc.ToString("o"))")
+                    [void]$logTextBuilder.AppendLine("SIZE BYTES: $($file.Length)")
+                    [void]$logTextBuilder.AppendLine("TAIL LINES:")
+                    [void]$logTextBuilder.AppendLine("")
+
+                    try {
+                      $tail = Get-Content $file.FullName -Tail $maxLinesPerFile -ErrorAction Stop
+                      foreach ($line in $tail) {
+                        [void]$logTextBuilder.AppendLine($line)
+                      }
+                    }
+                    catch {
+                      [void]$logTextBuilder.AppendLine("Could not read file: $($_.Exception.Message)")
+                    }
+
+                    [void]$logTextBuilder.AppendLine("")
+                  }
+                }
+
+                $fullText = $logTextBuilder.ToString()
+
+                if ($fullText.Length -gt $maxChars) {
+                  Write-Host "Agent input is longer than max chars. Truncating."
+                  Write-Host "Original length:"
+                  Write-Host $fullText.Length
+                  Write-Host "Max chars:"
+                  Write-Host $maxChars
+
+                  $fullText = $fullText.Substring($fullText.Length - $maxChars)
+                }
+
+                Set-Content `
+                  -Path $agentInputPath `
+                  -Value $fullText `
+                  -Encoding UTF8
+
+                Write-Host "Agent input created:"
+                Write-Host $agentInputPath
+
+                Write-Host "Agent input length:"
+                Write-Host $fullText.Length
+
+                Write-Host "============================================================"
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 10 - CALL AZURE OPENAI MODEL"
+              Write-Host "============================================================"
+
+              $endpoint = "$(AZURE_OPENAI_ENDPOINT)".TrimEnd("/")
+              $deploymentName = "$(AZURE_OPENAI_DEPLOYMENT_NAME)"
+              $apiVersion = "$(AZURE_OPENAI_API_VERSION)"
+              $apiKey = $env:AZURE_OPENAI_API_KEY
+
+              $agentInputPath = "$(agentInputPath)"
+              $reportMarkdownPath = "$(reportMarkdownPath)"
+              $reportHtmlPath = "$(reportHtmlPath)"
+
+              if (!(Test-Path $agentInputPath)) {
+                Write-Error "Agent input file was not found: $agentInputPath"
+                exit 1
+              }
+
+              if ([string]::IsNullOrWhiteSpace($apiKey)) {
+                Write-Error "AZURE_OPENAI_API_KEY is empty."
+                exit 1
+              }
+
+              $inputText = Get-Content $agentInputPath -Raw
+
+              Write-Host "Endpoint:"
+              Write-Host $endpoint
+              Write-Host ""
+              Write-Host "Deployment:"
+              Write-Host $deploymentName
+              Write-Host ""
+              Write-Host "API version:"
+              Write-Host $apiVersion
+              Write-Host ""
+              Write-Host "Agent input characters:"
+              Write-Host $inputText.Length
+
+              $systemPrompt = @"
+You are an Azure DevOps diagnostic agent.
+
+Your task:
+Analyze backend Azure App Service logs, health checks, App Setting names, and deployment signals.
+
+Return a short professional report in Markdown.
+
+Rules:
+- Do not invent facts.
+- Do not mention or print secrets.
+- Focus on evidence from the logs.
+- If evidence is insufficient, say so.
+- Produce exactly 10 numbered findings.
+- Each finding must contain:
+  - Finding
+  - Evidence
+  - Remediation
+- Keep each finding concise.
+- After the 10 findings, add a final "Executive Summary" with maximum 5 lines.
+- Use English for the report.
+- Do not wrap the report in code fences.
+"@
+
+              $userPrompt = @"
+Analyze this Azure App Service backend diagnostic context and create the report.
+
+Context:
+$inputText
+"@
+
+              $body = @{
+                messages = @(
+                  @{
+                    role = "system"
+                    content = $systemPrompt
+                  },
+                  @{
+                    role = "user"
+                    content = $userPrompt
+                  }
+                )
+                temperature = 0.2
+                max_tokens = 1800
+              } | ConvertTo-Json -Depth 20
+
+              $uri = "$endpoint/openai/deployments/$deploymentName/chat/completions?api-version=$apiVersion"
+
+              Write-Host "Calling Azure OpenAI chat completions endpoint..."
+              Write-Host "URI:"
+              Write-Host $uri
+              Write-Host "API key is present but not printed."
+
+              $headers = @{
+                "Content-Type" = "application/json"
+                "api-key" = $apiKey
+              }
+
+              try {
+                $response = Invoke-RestMethod `
+                  -Method Post `
+                  -Uri $uri `
+                  -Headers $headers `
+                  -Body $body `
+                  -TimeoutSec 120
+
+                $report = $response.choices[0].message.content
+
+                if ([string]::IsNullOrWhiteSpace($report)) {
+                  Write-Error "Azure OpenAI returned an empty report."
+                  exit 1
+                }
+
+                Set-Content `
+                  -Path $reportMarkdownPath `
+                  -Value $report `
+                  -Encoding UTF8
+
+                $htmlEncoded = [System.Net.WebUtility]::HtmlEncode($report)
+
+                $html = @"
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI DevOps Log Review</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      line-height: 1.5;
+      color: #111827;
+    }
+    h1 {
+      border-bottom: 1px solid #e5e7eb;
+      padding-bottom: 12px;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h1>AI DevOps Log Review</h1>
+  <pre>$htmlEncoded</pre>
+</body>
+</html>
+"@
+
+                Set-Content `
+                  -Path $reportHtmlPath `
+                  -Value $html `
+                  -Encoding UTF8
+
+                Write-Host "AI report generated successfully."
+                Write-Host "Markdown report:"
+                Write-Host $reportMarkdownPath
+                Write-Host ""
+                Write-Host "HTML report:"
+                Write-Host $reportHtmlPath
+              }
+              catch {
+                Write-Host "Azure OpenAI call failed."
+
+                if ($_.Exception.Response -ne $null) {
+                  Write-Host "HTTP status:"
+                  Write-Host ([int]$_.Exception.Response.StatusCode)
+
+                  try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $errorBody = $reader.ReadToEnd()
+                    Write-Host "Error response body:"
+                    Write-Host $errorBody
+                  }
+                  catch {
+                    Write-Host "Could not read error response body."
+                  }
+                }
+                else {
+                  Write-Host $_.Exception.Message
+                }
+
+                throw
+              }
+
+              Write-Host "============================================================"
+            displayName: Analyze logs with Azure OpenAI
+            env:
+              AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 11 - FINAL ARTIFACT SUMMARY"
+              Write-Host "============================================================"
+              Write-Host "The following files will be published:"
+              Write-Host ""
+              Write-Host "Agent input:"
+              Write-Host "$(agentInputPath)"
+              Write-Host ""
+              Write-Host "Markdown report:"
+              Write-Host "$(reportMarkdownPath)"
+              Write-Host ""
+              Write-Host "HTML report:"
+              Write-Host "$(reportHtmlPath)"
+              Write-Host ""
+              Write-Host "Downloaded logs ZIP:"
+              Write-Host "$(logsZipPath)"
+              Write-Host "============================================================"
+            displayName: Print final artifact summary
+
+          - task: PublishBuildArtifacts@1
+            displayName: Publish AI agent report artifact
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: '$(artifactName)'
+              publishLocation: Container

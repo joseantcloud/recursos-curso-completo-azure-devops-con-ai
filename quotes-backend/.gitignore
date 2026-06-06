@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+bin/
+obj/
+uploads/
+
+*.user
+*.suo
+*.db
+*.db-shm
+*.db-wal
+
+.vs/
+TestResults/
+coverage/

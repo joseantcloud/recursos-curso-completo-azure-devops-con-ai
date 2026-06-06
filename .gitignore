@@ -1,8 +1,3 @@
-# Nested course repositories are managed independently.
-quotes-backend/
-quotes-frontend/
-quotes-infra-iac/
-
 # Secrets and local environment.
 .env
 .env.*
