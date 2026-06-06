@@ -14,6 +14,15 @@ Los recursos principales viven en tres repositorios independientes:
 | `quotes-backend` | API backend de Quotes App con .NET, Azure SQL, JWT, Blob Storage, App Configuration y Application Insights. |
 | `quotes-frontend` | Frontend React/Vite de Quotes App con servidor Node para configuracion runtime. |
 
+## Diagramas De Arquitectura
+
+Este indice incluye un diagrama de arquitectura de Quotes App para apoyar la explicacion del curso:
+
+| Archivo | Uso |
+|---|---|
+| [`arquitectura_quotes_app_diagrams_net_4.drawio.png`](arquitectura_quotes_app_diagrams_net_4.drawio.png) | Imagen lista para ver en GitHub, presentaciones o documentacion. |
+| [`arquitectura_quotes_app_diagrams_net_4.drawio.html`](arquitectura_quotes_app_diagrams_net_4.drawio.html) | Version editable/exportable del diagrama en formato Draw.io HTML. |
+
 ## Clonar Los Repositorios
 
 Desde esta carpeta, ejecuta:
