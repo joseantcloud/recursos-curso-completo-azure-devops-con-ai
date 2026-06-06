@@ -1,0 +1,24 @@
+# Nested course repositories are managed independently.
+quotes-backend/
+quotes-frontend/
+quotes-infra-iac/
+
+# Secrets and local environment.
+.env
+.env.*
+!.env.example
+
+# Common generated files.
+node_modules/
+dist/
+bin/
+obj/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+
+# OS/editor noise.
+.DS_Store
+.vscode/
